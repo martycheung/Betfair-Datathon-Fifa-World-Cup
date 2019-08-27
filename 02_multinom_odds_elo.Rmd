@@ -1,0 +1,239 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+### Try to build a function to do a rolling window prediction for 2006, 2010 and 2014, to check stability of model.
+
+```{r}
+# Model 2 - multinomial on only raw features
+
+library(readr)
+library(dplyr)
+library(elo)
+library(lubridate)
+library(MLmetrics)
+library(nnet)
+
+# Read in the world cup CSV data
+rawdata = read_csv("wc_datathon_dataset.csv")
+
+data_train = rawdata %>%
+  filter(
+    # Match should occur after 2010 world cup
+    date > rawdata %>% filter(tournament == "World Cup 2010") %>% pull(date) %>% max()
+  )
+
+# Bring in Simple ELO Ratings from the past 4 years
+read_csv("country_elos.csv") %>% mutate(country_name=tolower(country_name))  -> country_elos
+
+```
+
+# Build 1st Pass Multinom Model using nnet
+- include all original variables with simple elo ratings and betfair odds
+
+```{r}
+library(stringr)
+# Set up multinomial winlossdraw outcome
+df_train <- data_train %>% 
+  mutate(team_1_result = case_when(team_1_goals>team_2_goals ~ "WIN",
+                                   team_1_goals<team_2_goals ~ "LOSS",
+                                   team_1_goals==team_2_goals ~ "DRAW"),
+         friendly_or_not = ifelse(tournament=="Friendly",1,0),
+         world_cup_flag = ifelse(str_detect(tournament,"World Cup"),1,0),
+         team_1=tolower(team_1),
+         team_2=tolower(team_2)) %>% 
+  left_join(country_elos%>% select(-country_ind),by=c("team_1"="country_name")) %>% 
+  rename(team_1_elo = current_elo)  %>% 
+  left_join(country_elos%>% select(-country_ind),by=c("team_2"="country_name")) %>% 
+  rename(team_2_elo = current_elo)%>% 
+  select(-tournament,-contains("goals"))
+
+# Add Fifa rankings by closest date before
+fifa_rankings <- read_csv("fifa_ranking.csv") %>% 
+  mutate(rank_date=as.Date(rank_date,"%d/%m/%Y"),
+         country_full=tolower(country_full))
+df_train_rankings <- df_train %>% 
+  left_join(fifa_rankings %>% select(rank,country_full,rank_date),by=c("team_1"="country_full")) %>% 
+  group_by(team_1,date) %>% 
+  filter(date>=rank_date) %>% 
+  arrange(desc(rank_date)) %>% 
+  filter(row_number()==1) %>% 
+  rename(team_1_ranking=rank) %>% select(-rank_date) %>%  ungroup() %>% 
+  left_join(fifa_rankings %>% select(rank,country_full,rank_date),by=c("team_2"="country_full")) %>% 
+  group_by(team_2,date) %>% 
+  filter(date>=rank_date) %>% 
+  arrange(desc(rank_date)) %>% 
+  filter(row_number()==1) %>% 
+  rename(team_2_ranking=rank)%>% select(-rank_date) %>% ungroup() %>% 
+  select(-date,-team_1,-team_2)
+
+df_test <- read_csv("test.csv")%>% 
+  mutate(date=as.Date(date,"%d/%m/%Y"))
+df_test_rankings <- df_test %>% 
+  left_join(fifa_rankings %>% select(rank,country_full,rank_date),by=c("team_1"="country_full")) %>% 
+  group_by(team_1,date) %>% 
+  filter(date>=rank_date) %>% 
+  arrange(desc(rank_date)) %>% 
+  filter(row_number()==1) %>% ungroup() %>% 
+  rename(team_1_ranking=rank) %>% select(-rank_date) %>%  
+  left_join(fifa_rankings %>% select(rank,country_full,rank_date),by=c("team_2"="country_full")) %>% 
+  group_by(team_2,date) %>% 
+  filter(date>=rank_date) %>% 
+  arrange(desc(rank_date)) %>% 
+  filter(row_number()==1) %>% ungroup() %>% 
+  rename(team_2_ranking=rank)%>% select(-rank_date) %>% 
+  left_join(country_elos%>% select(-country_ind),by=c("team_1"="country_name")) %>% 
+  rename(team_1_elo = current_elo)  %>% 
+  left_join(country_elos%>% select(-country_ind),by=c("team_2"="country_name")) %>% 
+  rename(team_2_elo = current_elo) %>% 
+  select(-date,-team_1,-team_2,-match_id)
+
+firstpass_model <- multinom(team_1_result ~ ., data = df_train_rankings)
+
+summary(firstpass_model)
+
+# Probabilities
+predictions=predict(firstpass_model,df_test_rankings,type="probs")
+
+# Read in submission file
+wc_2018 <- cbind(read_csv("john_smith_numbersman1.csv"),predictions) %>% 
+  mutate(prob_team_1_win = WIN,
+         prob_team_1_draw = DRAW,
+         prob_team_1_lose = LOSS) %>% 
+  select(-WIN,-LOSS,-DRAW)
+
+write_csv(wc_2018,"martin_cheung_elo_odds_rank.csv")
+
+```
+
+ELO only
+
+```{r}
+model2 <- multinom(team_1_result ~ ., data = df_train_rankings %>% select(-contains("odds"),-contains("ranking")))
+
+summary(model2)
+
+# Probabilities
+predictions2=predict(model2,df_test_rankings,type="probs")
+
+# Read in submission file
+wc_2018_2 <- cbind(read_csv("john_smith_numbersman1.csv"),predictions2) %>% 
+  mutate(prob_team_1_win = WIN,
+         prob_team_1_draw = DRAW,
+         prob_team_1_lose = LOSS) %>% 
+  select(-WIN,-LOSS,-DRAW)
+
+write_csv(wc_2018_2,"martin_cheung_elo.csv")
+
+```
+
+Rankings only
+
+```{r}
+model3 <- multinom(team_1_result ~ ., data = df_train_rankings %>% select(-contains("odds"),-contains("elo")))
+
+summary(model3)
+
+# Probabilities
+predictions3=predict(model3,df_test_rankings,type="probs")
+
+# Read in submission file
+wc_2018_3 <- cbind(read_csv("john_smith_numbersman1.csv"),predictions3) %>% 
+  mutate(prob_team_1_win = WIN,
+         prob_team_1_draw = DRAW,
+         prob_team_1_lose = LOSS) %>% 
+  select(-WIN,-LOSS,-DRAW)
+
+write_csv(wc_2018_3,"martin_cheung_rank.csv")
+
+```
+
+Odds only
+
+```{r}
+model4 <- multinom(team_1_result ~ ., data = df_train_rankings %>% select(-contains("rank"),-contains("elo")))
+
+summary(model4)
+
+# Probabilities
+predictions4=predict(model4,df_test_rankings,type="probs")
+
+# Read in submission file
+wc_2018_4 <- cbind(read_csv("john_smith_numbersman1.csv"),predictions4) %>% 
+  mutate(prob_team_1_win = WIN,
+         prob_team_1_draw = DRAW,
+         prob_team_1_lose = LOSS) %>% 
+  select(-WIN,-LOSS,-DRAW)
+
+write_csv(wc_2018_4,"martin_cheung_odds.csv")
+
+```
+
+No Odds
+
+```{r}
+model5 <- multinom(team_1_result ~ ., data = df_train_rankings %>% select(-contains("odds")))
+
+summary(model5)
+
+# Probabilities
+predictions5=predict(model5,df_test_rankings,type="probs")
+
+# Read in submission file
+wc_2018_5 <- cbind(read_csv("john_smith_numbersman1.csv"),predictions5) %>% 
+  mutate(prob_team_1_win = WIN,
+         prob_team_1_draw = DRAW,
+         prob_team_1_lose = LOSS) %>% 
+  select(-WIN,-LOSS,-DRAW)
+
+write_csv(wc_2018_5,"martin_cheung_no_odds.csv")
+
+```
+
+# No Odds - Add draw rates
+
+```{r}
+# To our WC 2018 dataset let's add in our predicted win probabilities and fold in the expected draw rates from our table above
+wc_2018_5 = wc_2018_5 %>%
+  select(-prob_team_1_draw) %>%
+  mutate(
+    prob_team_1_win = wc_2018_home_probabilities,
+    prob_team_1_lose = 1 - prob_team_1_win,
+    prob_bucket = round(20 * abs((prob_team_1_win - prob_team_1_lose))) / 20
+  ) %>%
+  left_join(draw_rates) %>%
+  mutate(
+    prob_team_1_win = prob_team_1_win - 0.5 * draw_prob,
+    prob_team_1_lose = prob_team_1_lose - 0.5 * draw_prob
+  ) %>%
+  select(date, match_id, team_1, team_2, prob_team_1_win, "prob_team_1_draw" = draw_prob, prob_team_1_lose, -prob_bucket)
+
+write_csv(wc_2018_5,"martin_cheung_no_odds_drawrate.csv")
+
+
+```
+
+# Rank Only - Add draw rates
+
+```{r}
+# To our WC 2018 dataset let's add in our predicted win probabilities and fold in the expected draw rates from our table above
+wc_2018_6 = wc_2018_3 %>%
+  select(-prob_team_1_draw) %>%
+  mutate(
+    prob_team_1_win = wc_2018_home_probabilities,
+    prob_team_1_lose = 1 - prob_team_1_win,
+    prob_bucket = round(20 * abs((prob_team_1_win - prob_team_1_lose))) / 20
+  ) %>%
+  left_join(draw_rates) %>%
+  mutate(
+    prob_team_1_win = prob_team_1_win - 0.5 * draw_prob,
+    prob_team_1_lose = prob_team_1_lose - 0.5 * draw_prob
+  ) %>%
+  select(date, match_id, team_1, team_2, prob_team_1_win, "prob_team_1_draw" = draw_prob, prob_team_1_lose, -prob_bucket)
+
+write_csv(wc_2018_6,"martin_cheung_rankonly_drawrate.csv")
+
+
+```
+

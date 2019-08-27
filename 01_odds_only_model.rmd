@@ -1,0 +1,44 @@
+---
+title: "Betfair Odds Only"
+output: html_notebook
+---
+
+
+```{r}
+# Betfair odds only model
+
+library(readr)
+library(dplyr)
+library(elo)
+library(lubridate)
+library(MLmetrics)
+library(nnet)
+
+# Read in the world cup CSV data
+rawdata = read_csv("wc_datathon_dataset.csv")
+
+test_set = rawdata %>% filter(tournament == "World Cup 2014")
+
+# Use raw Betfair odds, by linearly scaling the odds between 0-1
+predictions <- test_set %>% 
+  mutate(WIN = team_1_betfair_odds/(team_1_betfair_odds+team_2_betfair_odds+draw_betfair_odds),
+         LOSS = team_2_betfair_odds/(team_1_betfair_odds+team_2_betfair_odds+draw_betfair_odds),
+         DRAW = draw_betfair_odds/(team_1_betfair_odds+team_2_betfair_odds+draw_betfair_odds)) %>% 
+  select(WIN,LOSS,DRAW)
+
+model_performance_set <- test_set %>% 
+  mutate(actual_win = ifelse(team_1_goals>team_2_goals,1,0),
+         actual_loss = ifelse(team_1_goals<team_2_goals,1,0),
+         actual_draw = ifelse(team_1_goals==team_2_goals,1,0)) %>% 
+  select(one_of(c("actual_win", "actual_loss", "actual_draw"))) %>% 
+  cbind(predictions)
+
+MultiLogLoss(
+  y_pred = model_performance_set[,c("WIN", "LOSS", "DRAW")],
+  y_true = model_performance_set[,c("actual_win", "actual_loss", "actual_draw")]
+)
+
+
+```
+
+# Logloss is now 1.201046 using only odds from betfair
